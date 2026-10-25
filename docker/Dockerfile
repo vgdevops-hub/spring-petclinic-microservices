@@ -1,28 +1,18 @@
-FROM eclipse-temurin:17 AS builder
-WORKDIR application
-ARG ARTIFACT_NAME
-COPY ${ARTIFACT_NAME}.jar application.jar
-RUN java -Djarmode=layertools -jar application.jar extract
+# Copy to <service>/Dockerfile. Build context = the service directory (Jenkins runs: docker build ... <service>).
+# The JAR is produced by "mvn clean package" in the pipeline, so the image contains only a JRE + the JAR.
+FROM eclipse-temurin:21-jre-alpine
 
+# Run as a non-root user (also enforce runAsNonRoot in the Kubernetes securityContext later)
+RUN addgroup -S app && adduser -S app -G app
 
-FROM eclipse-temurin:17
-WORKDIR application
+WORKDIR /app
+COPY target/*.jar /app/app.jar
+USER app
 
-ARG EXPOSED_PORT
-EXPOSE ${EXPOSED_PORT}
+# Size the heap from the container memory limit instead of hard-coding -Xmx
+ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError"
 
-ENV SPRING_PROFILES_ACTIVE=docker
+# Informational only; set to the service's real port (order=8070, product=8050, ...)
+EXPOSE 8080
 
-COPY --from=builder application/dependencies/ ./
-
-# fix for https://stackoverflow.com/questions/51115856/docker-failed-to-export-image-failed-to-create-image-failed-to-get-layer
-# (only last copy caused issue)
-# this seems to be triggered by using btrfs:
-# https://github.com/moby/moby/issues/36573
-RUN true
-COPY --from=builder application/spring-boot-loader/ ./
-RUN true
-COPY --from=builder application/snapshot-dependencies/ ./
-RUN true
-COPY --from=builder application/application/ ./
-ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]
