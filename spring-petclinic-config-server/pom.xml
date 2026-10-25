@@ -31,7 +31,13 @@
 		<dependency>
 			<groupId>org.springframework.cloud</groupId>
 			<artifactId>spring-cloud-config-server</artifactId>
-		</dependency>
+                </dependency>
+
+	<!-- Actuator: exposes /actuator/health for K8s probes and the pipeline smoke test -->
+                <dependency>
+                         <groupId>org.springframework.boot</groupId>
+                         <artifactId>spring-boot-starter-actuator</artifactId>
+                </dependency>
 
         <!-- Third-party librairies -->
         <dependency>
