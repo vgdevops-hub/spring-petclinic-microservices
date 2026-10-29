@@ -1,0 +1,9 @@
+# Replace <your-github-username> with your GitHub username (keep the @).
+# Last matching pattern wins. With a team, each owner is auto-requested as reviewer.
+*                           @vgdevops-hub
+/jenkins/                   @vgdevops-hub
+/docker/                    @vgdevops-hub
+/infra/                     @vgdevops-hub
+/k8s/                       @vgdevops-hub
+/.github/                   @vgdevops-hub
+
