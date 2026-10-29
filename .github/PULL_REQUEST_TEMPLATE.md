@@ -1,24 +1,17 @@
-## Description
+## What and why
+<!-- One or two sentences: what changed and the reason -->
 
-<!-- Please describe your change clearly. If it fixes a bug, link the issue. -->
-
-Fixes # (issue)
-
-## Type of change
-
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Documentation update
-- [ ] Dependency upgrade
+## Area touched
+- [ ] Application service(s): customers / vets / visits / api-gateway / config / discovery / admin
+- [ ] Docker or Jenkins pipeline
+- [ ] Terraform (infra/)
+- [ ] Kubernetes manifests (k8s/)
+- [ ] Docs only
 
 ## Checklist
+- [ ] Builds and tests pass locally (`./mvnw -B -ntp clean package`)
+- [ ] No secrets, keys, tokens, .pem or .tfvars files in the diff
+- [ ] Trivy CRITICAL gate still passes (or a dated .trivyignore entry explains why)
+- [ ] Docs updated if behaviour changed
+- [ ] Rollback is possible (no destructive change without a plan)
 
-- [ ] I have read the [CONTRIBUTING](../CONTRIBUTING.md) guide
-- [ ] **This is NOT coursework, a student assignment, or homework** — I understand that forks of this repo are widely used in courses and that student PRs will be closed without review
-- [ ] My change targets the `main` branch of **spring-petclinic/spring-petclinic-microservices**, not my own fork
-- [ ] I have tested this change locally
-- [ ] Existing tests pass (`./mvnw test`)
-
-> ⚠️ **Are you a student?**  
-> If you forked this repo for a course or bootcamp, your changes belong in **your own fork**, not here.  
-> PRs that are part of a course assignment will be labelled `invalid` and closed immediately.

@@ -21,3 +21,12 @@ target/
 generated/
 
 **/.DS_Store
+
+*.pem
+.env
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+kubeconfig*
+build.log
