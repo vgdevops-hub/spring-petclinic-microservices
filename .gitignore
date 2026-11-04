@@ -30,3 +30,7 @@ generated/
 .terraform/
 kubeconfig*
 build.log
+
+backend.hcl
+tfplan
+*.tfplan
