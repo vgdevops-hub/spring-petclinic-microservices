@@ -50,9 +50,10 @@ resource "aws_instance" "jenkins" {
   iam_instance_profile        = aws_iam_instance_profile.jenkins.name
   associate_public_ip_address = true # outbound internet; there is no inbound rule unless you add one
 
-  user_data = templatefile("${path.module}/user_data.sh.tftpl", {
+  # replace() strips any Windows carriage returns so the script still runs on Linux
+  user_data = replace(templatefile("${path.module}/user_data.sh", {
     kubectl_minor = var.kubectl_minor
-  })
+  }), "\r", "")
 
   metadata_options {
     http_tokens                 = "required" # IMDSv2 only

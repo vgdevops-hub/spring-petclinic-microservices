@@ -34,3 +34,35 @@ build.log
 backend.hcl
 tfplan
 *.tfplan
+
+##########################################################
+#below added by me (user)
+# Existing rules
+node_modules/
+target/
+.env
+
+# Additional Terraform ignore rules
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+*.tfvars
+!*.tfvars.example
+backend.hcl
+*.backup
+
+# Credentials and secrets
+*.pem
+*.key
+*.secret
+.env.*
+!.env.example
+*credentials*
+*secret*
+
+###################################################
+
+
+
