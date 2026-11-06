@@ -1,0 +1,233 @@
+// Template: scripts/gen-jenkinsfiles.sh stamps __SERVICE__ / __PORT__ into jenkins/<service>/Jenkinsfile
+// Job type : one Multibranch Pipeline per service (GitHub Branch Source), Script Path = jenkins/<service>/Jenkinsfile
+// Webhook  : http://<jenkins-ip>:8080/github-webhook/  (content type application/json; push + pull_request events)
+// Behaviour: every branch/PR runs build + test + Trivy (only if THIS service's files changed).
+//            Only 'main' pushes the image to ECR. Deployment to EKS stays OFF until DEPLOY_ENABLED = 'true' (Phase 7).
+// Repo facts this relies on (verified in Phase 0): root Maven reactor + ./mvnw, modules named
+// spring-petclinic-<service>, docker/Dockerfile taking ARTIFACT_NAME + EXPOSED_PORT build args
+// with the module's target/ directory as build context.
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '15'))
+    timeout(time: 40, unit: 'MINUTES')
+  }
+
+  parameters {
+    booleanParam(name: 'ROLLBACK_ONLY', defaultValue: false,
+                 description: 'Skip build/deploy. Roll the running Deployment back (no rebuild, no new image).')
+    string(name: 'ROLLBACK_REVISION', defaultValue: '',
+           description: 'Optional: revision number from "kubectl rollout history". Empty = previous revision.')
+  }
+
+  environment {
+    // ---- stamped per service by the generator ----
+    SERVICE        = '__SERVICE__'                // K8s Deployment/Service/container + ECR repo name, e.g. customers-service
+    SERVICE_PORT   = '__PORT__'
+    // ---- shared ----
+    MODULE         = "spring-petclinic-${SERVICE}"
+    AWS_REGION     = 'ap-south-1'
+    // Account id is read from the Jenkins instance role at run time, so no account number lives in the repo
+    AWS_ACCOUNT    = sh(returnStdout: true, script: 'aws sts get-caller-identity --query Account --output text').trim()
+    ECR_REGISTRY   = "${AWS_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    ECR_REPO       = "petclinic/${SERVICE}"
+    EKS_CLUSTER    = 'petclinic-eks'
+    K8S_NAMESPACE  = 'petclinic'
+    SNS_TOPIC_ARN  = "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT}:petclinic-ci-notifications"
+    TRIVY_CACHE_DIR = '/var/lib/jenkins/.cache/trivy'
+    DEPLOY_ENABLED = 'false'                      // flip to 'true' in Phase 7, once the EKS cluster and manifests exist
+  }
+
+  stages {
+
+    // Decide whether this service is affected. Runs on every branch/PR build so the GitHub status check
+    // always reports (a skipped service reports green quickly; an affected service is really tested).
+    stage('Detect changes') {
+      when { not { expression { params.ROLLBACK_ONLY } } }
+      steps {
+        script {
+          def manual = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause') ? true : false
+          def run = manual                                   // "Build Now" always runs the full pipeline
+          if (!manual) {
+            def range = 'HEAD~1 HEAD'                        // main: squash merge = exactly one commit
+            if (env.CHANGE_TARGET) {                         // pull request: compare with the target branch
+              sh 'git fetch --no-tags origin "+refs/heads/$CHANGE_TARGET:refs/remotes/origin/$CHANGE_TARGET"'
+              range = "origin/${env.CHANGE_TARGET}...HEAD"
+            }
+            def files = sh(returnStdout: true, script: "git diff --name-only ${range}").trim().split('\n') as List
+            echo "Changed files:\n${files.join('\n')}"
+            run = files.any { it == 'pom.xml' || it.startsWith('docker/') || it.startsWith("${env.MODULE}/") || it.startsWith("jenkins/${env.SERVICE}/") }
+          }
+          env.RUN_SERVICE = run.toString()
+          echo "Run ${env.SERVICE} pipeline: ${env.RUN_SERVICE}"
+        }
+      }
+    }
+
+    stage('Service pipeline') {
+      when {
+        allOf {
+          not { expression { params.ROLLBACK_ONLY } }
+          expression { env.RUN_SERVICE == 'true' }
+        }
+      }
+      stages {
+
+        stage('Prepare') {
+          steps {
+            script {
+              env.BUILD_RAN = 'true'
+              env.SHORT_SHA = sh(returnStdout: true, script: 'git rev-parse --short=7 HEAD').trim()
+              env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.SHORT_SHA}"      // immutable + traceable to a commit
+              env.IMAGE_URI = "${env.ECR_REGISTRY}/${env.ECR_REPO}:${env.IMAGE_TAG}"
+              echo "Image will be ${env.IMAGE_URI}"
+            }
+          }
+        }
+
+        stage('Build & Unit Test') {
+          steps {
+            // compile + unit tests + executable JAR for this module (and the parent POM). Failure stops the pipeline.
+            sh './mvnw -B -ntp -pl "$MODULE" -am clean package'
+          }
+          post {
+            always {
+              // Flip allowEmptyResults to false once every service has tests (admin-server has none today).
+              junit allowEmptyResults: true, testResults: "${env.MODULE}/target/surefire-reports/*.xml"
+            }
+          }
+        }
+
+        stage('Trivy: dependencies') {
+          steps {
+            // .trivyignore in the repo root (dated exceptions only) is picked up automatically
+            sh '''
+              trivy fs --no-progress --scanners vuln --severity CRITICAL \
+                --ignore-unfixed --exit-code 1 "$MODULE"
+            '''
+          }
+        }
+
+        stage('Docker build') {
+          steps {
+            // Mirrors the upstream buildDocker profile: Dockerfile from docker/, context = module target/
+            sh '''
+              JAR="$(ls "$MODULE"/target/*.jar | head -n1)"
+              docker build --pull --platform linux/amd64 \
+                -f docker/Dockerfile \
+                --build-arg ARTIFACT_NAME="$(basename "$JAR" .jar)" \
+                --build-arg EXPOSED_PORT="$SERVICE_PORT" \
+                --label org.opencontainers.image.revision="$SHORT_SHA" \
+                -t "$IMAGE_URI" "$MODULE/target"
+            '''
+          }
+        }
+
+        stage('Trivy: image') {
+          steps {
+            sh '''
+              # 1) Visibility: HIGH+CRITICAL report, never fails the build
+              trivy image --no-progress --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed \
+                --format table --output "trivy-${SERVICE}.txt" --exit-code 0 "$IMAGE_URI"
+              # 2) Policy gate: any fixable CRITICAL fails the pipeline
+              trivy image --no-progress --scanners vuln --severity CRITICAL --ignore-unfixed \
+                --exit-code 1 "$IMAGE_URI"
+            '''
+          }
+          post { always { archiveArtifacts artifacts: 'trivy-*.txt', allowEmptyArchive: true } }
+        }
+
+        stage('Push to ECR') {
+          when { branch 'main' }
+          steps {
+            // Auth from the Jenkins EC2 instance profile - no stored AWS keys.
+            sh '''
+              aws ecr get-login-password --region "$AWS_REGION" \
+                | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+              docker push "$IMAGE_URI"
+            '''
+          }
+        }
+
+        stage('Deploy & Verify') {
+          when {
+            allOf {
+              branch 'main'
+              expression { env.DEPLOY_ENABLED == 'true' }
+            }
+          }
+          steps {
+            script {
+              sh 'aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"'
+              try {
+                sh '''
+                  kubectl -n "$K8S_NAMESPACE" annotate deployment/"$SERVICE" \
+                    kubernetes.io/change-cause="build $BUILD_NUMBER commit $SHORT_SHA" --overwrite
+                  # container name in the manifest must equal $SERVICE
+                  kubectl -n "$K8S_NAMESPACE" set image deployment/"$SERVICE" "$SERVICE=$IMAGE_URI"
+                  kubectl -n "$K8S_NAMESPACE" rollout status deployment/"$SERVICE" --timeout=300s
+                '''
+                // Smoke test through the Kubernetes Service (actuator exposure must be confirmed in the config repo)
+                sh '''
+                  kubectl -n "$K8S_NAMESPACE" run "smoke-$SERVICE-$BUILD_NUMBER" --rm -i --restart=Never \
+                    --image=busybox:1.36 -- wget -qO- -T 5 "http://$SERVICE:$SERVICE_PORT/actuator/health" \
+                    2>&1 | grep -q '"status":"UP"'
+                '''
+              } catch (err) {
+                echo "Deployment verification failed: ${err}. Rolling back to the previous revision (no rebuild)."
+                sh '''
+                  kubectl -n "$K8S_NAMESPACE" rollout undo deployment/"$SERVICE"
+                  kubectl -n "$K8S_NAMESPACE" rollout status deployment/"$SERVICE" --timeout=300s
+                '''
+                env.ROLLED_BACK = 'true'
+                throw err            // keep the build RED so the failure is visible
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Manual, rebuild-free rollback: Build with Parameters -> ROLLBACK_ONLY = true
+    stage('Rollback only') {
+      when { expression { params.ROLLBACK_ONLY } }
+      steps {
+        script {
+          env.BUILD_RAN = 'true'
+          def to = params.ROLLBACK_REVISION?.trim() ? "--to-revision=${params.ROLLBACK_REVISION.trim()}" : ''
+          sh 'aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"'
+          withEnv(["TO=${to}"]) {
+            sh 'kubectl -n "$K8S_NAMESPACE" rollout undo deployment/"$SERVICE" $TO'
+          }
+          sh 'kubectl -n "$K8S_NAMESPACE" rollout status deployment/"$SERVICE" --timeout=300s'
+          env.ROLLED_BACK = 'true'
+        }
+      }
+    }
+  }
+
+  post {
+    success { script { notify('SUCCESS') } }
+    failure { script { notify('FAILED') } }
+    always {
+      sh 'docker rmi "$IMAGE_URI" || true'
+      deleteDir()
+    }
+  }
+}
+
+// SNS publish via the Jenkins instance-profile role. Quiet when the service was skipped or on feature-branch passes.
+def notify(String status) {
+  if (env.BUILD_RAN != 'true') { return }
+  if (status == 'SUCCESS' && env.BRANCH_NAME != 'main' && !params.ROLLBACK_ONLY) { return }
+  def rolled = (env.ROLLED_BACK == 'true') ? ' | ROLLED BACK to previous revision' : ''
+  def msg = "${status}: ${env.SERVICE} build #${env.BUILD_NUMBER} on ${env.BRANCH_NAME}" +
+            "\nimage: ${env.IMAGE_URI ?: 'n/a'}${rolled}\n${env.BUILD_URL}"
+  withEnv(["MSG=${msg}", "SUBJ=Jenkins ${status}: ${env.SERVICE} #${env.BUILD_NUMBER}"]) {
+    sh 'aws sns publish --region "$AWS_REGION" --topic-arn "$SNS_TOPIC_ARN" --subject "$SUBJ" --message "$MSG"'
+  }
+}

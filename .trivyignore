@@ -1,0 +1,6 @@
+# Dated exceptions to the Trivy CRITICAL gate. Fix by upgrading versions FIRST; add a line here only for a CVE
+# with no available fix, and always give it an expiry so it gets re-reviewed.
+# Format:   <CVE-ID> exp:YYYY-MM-DD      # service/library, why it is accepted, who reviewed
+#
+# Example (do not uncomment unless it is real):
+# CVE-2099-00000 exp:2027-01-31      # customers-service / libfoo: no fix released, not reachable
