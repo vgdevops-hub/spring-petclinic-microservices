@@ -1,1 +1,5 @@
 *.css linguist-generated=true
+
+*.sh text eol=lf
+*.tf text eol=lf
+*.tftpl text eol=lf
